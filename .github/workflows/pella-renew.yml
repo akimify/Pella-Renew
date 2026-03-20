@@ -36,7 +36,18 @@ jobs:
             xvfb \
             x11-utils \
             xdotool \
-            scrot
+            scrot \
+            fluxbox \
+            x11vnc
+
+      - name: 🖥️ 启动虚拟桌面和窗口管理器
+        run: |
+          Xvfb :99 -screen 0 1920x1080x24 -ac +extension GLX +render -noreset &
+          sleep 2
+          DISPLAY=:99 fluxbox &
+          sleep 2
+          echo "DISPLAY=:99" >> $GITHUB_ENV
+          echo "✅ 虚拟桌面已启动"
 
       - name: 🐍 安装 Python 依赖
         run: |
@@ -68,7 +79,7 @@ jobs:
           TG_BOT: ${{ secrets.TG_BOT }}
           GOST_PROXY: ${{ secrets.GOST_PROXY }}
         run: |
-          xvfb-run --auto-servernum --server-args="-screen 0 1920x1080x24" python renew.py
+          python renew.py
 
       - name: 📸 上传调试截图
         if: always()
