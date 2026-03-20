@@ -54,6 +54,23 @@ jobs:
           pip install seleniumbase pyautogui python-xlib
           seleniumbase install chromedriver
 
+      - name: 🔓 下载 NopeCHA 扩展
+        env:
+          NOPECHA_KEY: ${{ secrets.NOPECHA_KEY }}
+        run: |
+          mkdir -p nopecha_ext
+          # 从 Chrome Web Store 下载最新版 NopeCHA
+          EXT_ID="dknlfmjaanfblgfdfebhjalfolgke"
+          wget -q -O nopecha.crx             "https://clients2.google.com/service/update2/crx?response=redirect&prodversion=120.0.0.0&acceptformat=crx3&x=id%3D${EXT_ID}%26installsource%3Dondemand%26uc"
+          # 解压 crx（crx3 本质是 zip）
+          unzip -q -o nopecha.crx -d nopecha_ext 2>/dev/null || true
+          # 注入 API Key 到扩展配置
+          if [ -n "$NOPECHA_KEY" ]; then
+            find nopecha_ext -name "*.js" | xargs grep -l "nopecha_key\|api_key" 2>/dev/null | head -1 | xargs -I{} sed -i "s/nopecha_key:"[^"]*"/nopecha_key:"$NOPECHA_KEY"/g" {} || true
+          fi
+          echo "✅ NopeCHA 扩展已就绪"
+          ls nopecha_ext/
+
       - name: 🛡️ 启动 GOST 代理转发
         if: ${{ env.GOST_PROXY != '' }}
         env:
