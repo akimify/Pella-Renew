@@ -3,12 +3,12 @@ name: Pella-Renew
 on:
   workflow_dispatch:
   schedule:
-    - cron: '0 */20 * * *'   # 每20小时自动运行
+    - cron: '0 6 * * *'   # 每天 UTC 06:00 运行
 
 jobs:
   renew:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 15
     steps:
       - name: 📥 下载公库代码
         uses: actions/checkout@v4
@@ -21,10 +21,10 @@ jobs:
           path: private
 
       - name: 📂 移动脚本到工作目录
-        run: mv private/renew.py renew.py
+        run: mv private/renew_pella.py renew_pella.py
 
       - name: 🐍 设置 Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v4
         with:
           python-version: '3.10'
 
@@ -42,7 +42,7 @@ jobs:
           path: ~/.local/share/seleniumbase/drivers
           key: chromedriver-${{ runner.os }}
 
-      - name: 🛡️ 启动 GOST 代理
+      - name: 🛡️ 启动 Gost 代理
         run: |
           wget -q https://github.com/ginuerzh/gost/releases/download/v2.11.5/gost-linux-amd64-2.11.5.gz
           gunzip gost-linux-amd64-2.11.5.gz
@@ -50,9 +50,8 @@ jobs:
           echo "启动 Gost 转发隧道..."
           nohup ./gost -L http://:8080 -F ${{ secrets.GOST_PROXY }} > gost.log 2>&1 &
           sleep 3
-          IP=$(curl -sx http://127.0.0.1:8080 https://api.ipify.org)
-          IP_MASKED=$(echo "$IP" | sed 's/\([0-9]*\.[0-9]*\.[0-9]*\.\)[0-9]*/\1xx/')
-          echo "✅ GOST 已启动，出口IP：$IP_MASKED"
+          echo "测试本地代理连通性..."
+          curl -sx http://127.0.0.1:8080 https://api.ipify.org
 
       - name: 🛠️ 安装系统依赖
         run: |
@@ -80,18 +79,15 @@ jobs:
       - name: 🚀 运行续期脚本
         env:
           PYTHONIOENCODING: utf-8
-          PELLA_ACCOUNT: ${{ secrets.PELLA_ACCOUNT }}
-          PELLA_SERVER_NAME: ${{ secrets.PELLA_SERVER_NAME }}
           TG_BOT: ${{ secrets.TG_BOT }}
-          GOST_PROXY: ${{ secrets.GOST_PROXY }}
+          PELLA_ACCOUNT: ${{ secrets.PELLA_ACCOUNT }}
         run: |
           xvfb-run --auto-servernum --server-args="-screen 0 1920x1080x24" \
-            python renew.py
+            python renew_pella.py
 
-      - name: 📸 上传调试截图
+      - name: 📸 上传截图
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: debug-screenshots-${{ github.run_id }}
+          name: debug-screenshots
           path: "*.png"
-          retention-days: 3
