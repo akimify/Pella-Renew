@@ -3,17 +3,18 @@ name: Pella-Renew
 on:
   workflow_dispatch:
   schedule:
-    - cron: '0 6 * * *'   # 每天 UTC 06:00 运行
+    - cron: '0 */6 * * *'   # 每6小时自动运行
 
 jobs:
   renew:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 30
+
     steps:
-      - name: 📥 下载公库代码
+      - name: 📥 检出代码
         uses: actions/checkout@v4
 
-      - name: 📥 下载私库脚本
+      - name: 📥 拉取私库脚本
         uses: actions/checkout@v4
         with:
           repository: ${{ github.repository_owner }}/Pella-Renew-Private
@@ -21,73 +22,58 @@ jobs:
           path: private
 
       - name: 📂 移动脚本到工作目录
-        run: mv private/renew_pella.py renew_pella.py
+        run: mv private/pella_renew.py pella_renew.py
 
       - name: 🐍 设置 Python
-        uses: actions/setup-python@v4
+        uses: actions/setup-python@v5
         with:
-          python-version: '3.10'
-
-      - name: 🗂️ 缓存 NopeCHA 扩展
-        id: cache-nopecha
-        uses: actions/cache@v4
-        with:
-          path: nopecha_ext
-          key: nopecha-chromium-latest-v1
-
-      - name: 🗂️ 缓存 ChromeDriver
-        id: cache-chromedriver
-        uses: actions/cache@v4
-        with:
-          path: ~/.local/share/seleniumbase/drivers
-          key: chromedriver-${{ runner.os }}
-
-      - name: 🛡️ 启动 Gost 代理
-        run: |
-          wget -q https://github.com/ginuerzh/gost/releases/download/v2.11.5/gost-linux-amd64-2.11.5.gz
-          gunzip gost-linux-amd64-2.11.5.gz
-          chmod +x gost-linux-amd64-2.11.5 && mv gost-linux-amd64-2.11.5 gost
-          echo "启动 Gost 转发隧道..."
-          nohup ./gost -L http://:8080 -F ${{ secrets.GOST_PROXY }} > gost.log 2>&1 &
-          sleep 3
-          echo "测试本地代理连通性..."
-          curl -sx http://127.0.0.1:8080 https://api.ipify.org
+          python-version: '3.x'
 
       - name: 🛠️ 安装系统依赖
         run: |
-          sudo apt-get update -q
-          sudo apt-get install -y google-chrome-stable xvfb
+          sudo apt-get update -qq
+          sudo apt-get install -y \
+            google-chrome-stable \
+            xvfb \
+            x11-utils \
+            xdotool \
+            scrot
 
       - name: 🐍 安装 Python 依赖
-        run: pip install seleniumbase
-
-      - name: 🔧 安装 ChromeDriver
-        if: steps.cache-chromedriver.outputs.cache-hit != 'true'
-        run: seleniumbase install chromedriver
-
-      - name: 🧩 下载 NopeCHA 扩展
-        if: steps.cache-nopecha.outputs.cache-hit != 'true'
         run: |
-          wget -q "https://github.com/NopeCHALLC/nopecha-extension/releases/latest/download/chromium.zip" -O nopecha.zip
-          unzip nopecha.zip -d nopecha_ext_raw
-          MANIFEST=$(find nopecha_ext_raw -name "manifest.json" | head -1)
-          mkdir -p nopecha_ext
-          cp -r "$(dirname $MANIFEST)/." nopecha_ext/
-          rm -rf nopecha_ext_raw nopecha.zip
-          python3 -c "import json;m=json.load(open('nopecha_ext/manifest.json'));print('✅ 扩展加载：',m['name'],'v'+m['version'])"
+          pip install seleniumbase requests
+          seleniumbase install chromedriver
+
+      - name: 🛡️ 启动 GOST 代理转发
+        if: ${{ env.GOST_PROXY != '' }}
+        env:
+          GOST_PROXY: ${{ secrets.GOST_PROXY }}
+        run: |
+          VERSION=$(curl -s https://api.github.com/repos/ginuerzh/gost/releases/latest \
+            | grep '"tag_name"' | cut -d'"' -f4 | tr -d 'v')
+          echo "📦 GOST 版本: $VERSION"
+          wget -q "https://github.com/ginuerzh/gost/releases/download/v${VERSION}/gost_${VERSION}_linux_amd64.tar.gz"
+          tar -xzf "gost_${VERSION}_linux_amd64.tar.gz"
+          chmod +x gost
+          nohup ./gost -L http://:8080 -F "$GOST_PROXY" > gost.log 2>&1 &
+          sleep 3
+          IP=$(curl -s -x http://127.0.0.1:8080 https://api.ipify.org)
+          IP_MASKED=$(echo "$IP" | sed 's/\([0-9]*\.[0-9]*\.[0-9]*\.\)[0-9]*/\1xx/')
+          echo "✅ GOST 已启动，出口IP：$IP_MASKED"
 
       - name: 🚀 运行续期脚本
         env:
           PYTHONIOENCODING: utf-8
-          TG_BOT: ${{ secrets.TG_BOT }}
           PELLA_ACCOUNT: ${{ secrets.PELLA_ACCOUNT }}
+          TG_BOT: ${{ secrets.TG_BOT }}
+          GOST_PROXY: ${{ secrets.GOST_PROXY }}
         run: |
-          xvfb-run --auto-servernum --server-args="-screen 0 1920x1080x24" \
-            python renew_pella.py
+          xvfb-run --auto-servernum --server-args="-screen 0 1920x1080x24" python pella_renew.py
 
-      - name: 📸 上传截图
+      - name: 📸 上传调试截图
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: debug-screenshots
+          name: debug-screenshots-${{ github.run_id }}
           path: "*.png"
+          retention-days: 3
