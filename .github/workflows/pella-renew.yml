@@ -1,82 +1,726 @@
-name: Pella-Renew
+import os
+import re
+import time
+import subprocess
+import urllib.request
+import urllib.parse
+import datetime
+from seleniumbase import SB
 
-on:
-  workflow_dispatch:
-  schedule:
-    - cron: '0 */20 * * *'   # 每20小时自动运行（pella每次续24小时）
+# ============================================================
+# 配置
+# ============================================================
+_account = os.environ["PELLA_ACCOUNT"].split(",")
+EMAIL    = _account[0].strip()
+PASSWORD = _account[1].strip()
 
-jobs:
-  renew:
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    steps:
-      - name: 📥 检出代码
-        uses: actions/checkout@v4
+LOCAL_PROXY = "http://127.0.0.1:8080"
 
-      - name: 📥 拉取私库脚本
-        uses: actions/checkout@v4
-        with:
-          repository: ${{ github.repository_owner }}/Pella-Renew-Private
-          token: ${{ secrets.PRIVATE_REPO_TOKEN }}
-          path: private
+_tg_raw = os.environ.get("TG_BOT", "")
+TG_CHAT_ID = ""
+TG_TOKEN   = ""
+if _tg_raw and "," in _tg_raw:
+    _tg = _tg_raw.split(",")
+    TG_CHAT_ID = _tg[0].strip()
+    TG_TOKEN   = _tg[1].strip()
 
-      - name: 📂 移动脚本到工作目录
-        run: mv private/renew.py renew.py
+# ============================================================
+# 广告猎手（常驻 MutationObserver）
+# ============================================================
+AD_HUNTER_JS = """
+(function() {
+    if (window.__ad_hunter_injected__) return;
+    window.__ad_hunter_injected__ = true;
 
-      - name: 🐍 设置 Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.x'
+    var AD_SELECTORS = [
+        'iframe[src*="googlesyndication"]',
+        'iframe[src*="doubleclick"]',
+        'iframe[src*="adnxs"]',
+        'iframe[src*="openx"]',
+        'iframe[id*="google_ads"]',
+        'div[id*="google_ads"]',
+        'iframe[id="google_ads_top_frame"]',
+        'iframe[id="goog_plcm_frame"]',
+        '.adsbygoogle',
+        '[data-ad-slot]',
+    ];
 
-      - name: 🛠️ 安装系统依赖
-        run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y \
-            google-chrome-stable \
-            xvfb \
-            x11-utils \
-            xdotool \
-            scrot
+    var AD_SCRIPT_PATTERNS = [
+        'googlesyndication', 'doubleclick', 'adnxs', 'openx',
+        'googletag', 'uidapi', 'googletagmanager', 'securepubads',
+    ];
 
-      - name: 🐍 安装 Python 依赖
-        run: |
-          pip install seleniumbase
-          seleniumbase install chromedriver
+    function removeEl(el) {
+        try { if (el && el.parentNode) el.parentNode.removeChild(el); } catch(e) {}
+    }
 
-      - name: 🐍 安装 Python 依赖
-        run: |
-          pip install seleniumbase
-          seleniumbase install chromedriver
+    function killAds(root) {
+        root = root || document;
+        AD_SELECTORS.forEach(function(sel) {
+            try { root.querySelectorAll(sel).forEach(removeEl); } catch(e) {}
+        });
+        try {
+            root.querySelectorAll('script[src]').forEach(function(s) {
+                if (AD_SCRIPT_PATTERNS.some(function(p){ return (s.src||'').includes(p); })) removeEl(s);
+            });
+        } catch(e) {}
+        try {
+            root.querySelectorAll('script:not([src])').forEach(function(s) {
+                var t = s.textContent || '';
+                if (t.includes('googletag') || t.includes('googlesyndication')) removeEl(s);
+            });
+        } catch(e) {}
+    }
 
-      - name: 🛡️ 启动 GOST 代理转发
-        if: ${{ env.GOST_PROXY != '' }}
-        env:
-          GOST_PROXY: ${{ secrets.GOST_PROXY }}
-        run: |
-          VERSION=$(curl -s https://api.github.com/repos/ginuerzh/gost/releases/latest | grep '"tag_name"' | cut -d'"' -f4 | tr -d 'v')
-          echo "📦 GOST 版本: $VERSION"
-          wget -q "https://github.com/ginuerzh/gost/releases/download/v${VERSION}/gost_${VERSION}_linux_amd64.tar.gz"
-          tar -xzf "gost_${VERSION}_linux_amd64.tar.gz"
-          chmod +x gost
-          nohup ./gost -L http://:8080 -F "$GOST_PROXY" > gost.log 2>&1 &
-          sleep 3
-          echo "✅ GOST 已启动，测试连通性..."
-          curl -s -x http://127.0.0.1:8080 https://api.ipify.org
+    killAds(document);
 
-      - name: 🚀 运行续期脚本
-        env:
-          PYTHONIOENCODING: utf-8
-          PELLA_ACCOUNT: ${{ secrets.PELLA_ACCOUNT }}
-          PELLA_SERVER_NAME: ${{ secrets.PELLA_SERVER_NAME }}
-          TG_BOT: ${{ secrets.TG_BOT }}
-          GOST_PROXY: ${{ secrets.GOST_PROXY }}
-        run: |
-          xvfb-run --auto-servernum --server-args="-screen 0 1920x1080x24" python renew.py
+    new MutationObserver(function(mutations) {
+        mutations.forEach(function(m) {
+            m.addedNodes.forEach(function(node) {
+                if (node.nodeType !== 1) return;
+                var isAd = AD_SELECTORS.some(function(sel) {
+                    try { return node.matches(sel); } catch(e) { return false; }
+                });
+                if (isAd) { removeEl(node); return; }
+                if (node.querySelectorAll) killAds(node);
+            });
+        });
+    }).observe(document.documentElement, { childList: true, subtree: true });
 
-      - name: 📸 上传调试截图
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: debug-screenshots-${{ github.run_id }}
-          path: "*.png"
-          retention-days: 3
+    console.log('[AdHunter] 广告猎手已常驻');
+})();
+"""
+
+# ============================================================
+# Turnstile 通用模块
+# ============================================================
+EXPAND_POPUP_JS = """
+(function() {
+    var turnstileInput = document.querySelector('input[name="cf-turnstile-response"]');
+    if (!turnstileInput) return;
+    var el = turnstileInput;
+    for (var i = 0; i < 20; i++) {
+        el = el.parentElement;
+        if (!el) break;
+        var style = window.getComputedStyle(el);
+        if (style.overflow === 'hidden' || style.overflowX === 'hidden' || style.overflowY === 'hidden') {
+            el.style.overflow = 'visible';
+        }
+        el.style.minWidth = 'max-content';
+    }
+})();
+"""
+
+INJECT_TOKEN_LISTENER_JS = """
+(function() {
+    if (window.__cf_token_listener_injected__) return;
+    window.__cf_token_listener_injected__ = true;
+    window.__cf_turnstile_token__ = '';
+
+    window.addEventListener('message', function(e) {
+        try {
+            var d = e.data;
+            if (!d || typeof d !== 'object') return;
+            if (d.event === 'food') return;
+            var token = d.token || d.response;
+            if (token && token.length > 20) {
+                window.__cf_turnstile_token__ = token;
+                var inputs = document.querySelectorAll(
+                    'input[name="cf-turnstile-response"], input[name="cf_turnstile_response"]'
+                );
+                for (var i = 0; i < inputs.length; i++) {
+                    try {
+                        var nativeSet = Object.getOwnPropertyDescriptor(
+                            HTMLInputElement.prototype, 'value'
+                        ).set;
+                        nativeSet.call(inputs[i], token);
+                        inputs[i].dispatchEvent(new Event('input',  {bubbles: true}));
+                        inputs[i].dispatchEvent(new Event('change', {bubbles: true}));
+                    } catch(err) {
+                        inputs[i].value = token;
+                    }
+                }
+            }
+        } catch(err) {}
+    });
+})();
+"""
+
+READ_CAPTURED_TOKEN_JS = """
+(function(){
+    return window.__cf_turnstile_token__ || '';
+})()
+"""
+
+
+def xdotool_click(x, y):
+    """连续点击3次，间隔1秒，模拟多次真实点击"""
+    x, y = int(x), int(y)
+    success = False
+    for i in range(3):
+        try:
+            subprocess.run(
+                ["xdotool", "mousemove", str(x), str(y), "click", "1"],
+                check=True, capture_output=True
+            )
+            print(f"📐 坐标点击成功（第{i+1}次）")
+            success = True
+        except subprocess.CalledProcessError as e:
+            print(f"⚠️ xdotool执行异常（第{i+1}次）: {e.stderr.decode().strip()}")
+        except Exception as e:
+            print(f"⚠️ xdotool执行异常（第{i+1}次）: {e}")
+        if i < 2:
+            time.sleep(1)
+    return success
+
+
+def get_turnstile_metrics(sb):
+    for _ in range(10):
+        metrics = sb.execute_script("""
+            (function() {
+                var anchor = document.querySelector('input[name="cf-turnstile-response"]');
+                if (!anchor) return null;
+                var rect = anchor.parentElement.getBoundingClientRect();
+                if (rect.width === 0 || rect.height === 0) return 'waiting';
+                var viewportX = rect.left + (rect.width / 2) - 130;
+                var viewportY = rect.top + (rect.height / 2);
+                var iframes = document.querySelectorAll('iframe');
+                for (var i = 0; i < iframes.length; i++) {
+                    var src = iframes[i].src || '';
+                    if (src.includes('cloudflare') || src.includes('turnstile')) {
+                        var fr = iframes[i].getBoundingClientRect();
+                        if (fr.width > 0 && fr.height > 0) {
+                            viewportX = fr.left + 30;
+                            viewportY = fr.top + fr.height / 2;
+                            break;
+                        }
+                    }
+                }
+                return {
+                    viewport_x: Math.round(viewportX),
+                    viewport_y: Math.round(viewportY),
+                    win_x:    window.screenX || 0,
+                    win_y:    window.screenY || 0,
+                    outer_h:  window.outerHeight,
+                    inner_h:  window.innerHeight,
+                    outer_w:  window.outerWidth,
+                    inner_w:  window.innerWidth
+                };
+            })()
+        """)
+        if metrics != 'waiting':
+            return metrics
+        time.sleep(1)
+    return None
+
+
+def check_token(sb) -> bool:
+    try:
+        if sb.execute_script("""
+            (function(){
+                var input = document.querySelector('input[name="cf-turnstile-response"]');
+                return input && input.value && input.value.length > 20;
+            })()
+        """):
+            return True
+    except Exception:
+        pass
+    try:
+        token = sb.execute_script(READ_CAPTURED_TOKEN_JS)
+        if token and len(token) > 20:
+            return True
+    except Exception:
+        pass
+    return False
+
+
+def get_token_value(sb) -> str:
+    try:
+        token = sb.execute_script(READ_CAPTURED_TOKEN_JS)
+        if token and len(token) > 20:
+            return token
+    except Exception:
+        pass
+    try:
+        token = sb.execute_script("""
+            (function(){
+                var input = document.querySelector('input[name="cf-turnstile-response"]');
+                return (input && input.value) ? input.value : '';
+            })()
+        """)
+        if token and len(token) > 20:
+            return token
+    except Exception:
+        pass
+    return ''
+
+
+def turnstile_exists(sb) -> bool:
+    try:
+        return sb.execute_script(
+            "(function(){ return document.querySelector('input[name=\"cf-turnstile-response\"]') !== null; })()"
+        )
+    except Exception:
+        return False
+
+
+def inject_token_listener(sb):
+    try:
+        sb.execute_script(INJECT_TOKEN_LISTENER_JS)
+        print("📡 开始监控Cloudflare Turnstile Token...")
+    except Exception as e:
+        print(f"⚠️ 监听器注入失败：{e}")
+
+
+def solve_turnstile(sb) -> bool:
+    for _ in range(3):
+        sb.execute_script(EXPAND_POPUP_JS)
+        time.sleep(0.5)
+
+    if check_token(sb):
+        print("✅ 验证已自动通过")
+        return True
+
+    sb.execute_script("""
+        var anchor = document.querySelector('input[name="cf-turnstile-response"]');
+        if (anchor && anchor.parentElement) {
+            anchor.parentElement.scrollIntoView({behavior:'smooth', block:'center'});
+        }
+    """)
+    time.sleep(1.5)
+
+    metrics = get_turnstile_metrics(sb)
+    if metrics is None:
+        print("❌ 验证坐标获取失败")
+        sb.save_screenshot("turnstile_no_coords.png")
+        return False
+
+    vp_x        = metrics['viewport_x']
+    vp_y        = metrics['viewport_y']
+    win_x       = metrics['win_x']
+    win_y       = metrics['win_y']
+    toolbar_h   = metrics['outer_h'] - metrics['inner_h']
+    border_left = (metrics['outer_w'] - metrics['inner_w']) / 2 \
+                  if metrics['outer_w'] > metrics['inner_w'] else 0
+    abs_x = int(vp_x + win_x + border_left)
+    abs_y = int(vp_y + win_y + toolbar_h)
+    print("📐 坐标计算完成")
+
+    try:
+        sb.execute_script(f"""
+            (function(){{
+                var dot = document.getElementById('sniper-dot') || document.createElement('div');
+                dot.id = 'sniper-dot';
+                dot.style.position = 'fixed';
+                dot.style.left = '{vp_x - 5}px';
+                dot.style.top = '{vp_y - 5}px';
+                dot.style.width = '10px';
+                dot.style.height = '10px';
+                dot.style.backgroundColor = 'red';
+                dot.style.borderRadius = '50%';
+                dot.style.zIndex = '99999999';
+                dot.style.pointerEvents = 'none';
+                dot.style.boxShadow = '0 0 5px rgba(255,0,0,0.8)';
+                if (!document.getElementById('sniper-dot')) document.body.appendChild(dot);
+            }})();
+        """)
+    except Exception as e:
+        print(f"⚠️ 红点注入失败：{e}")
+
+    sb.save_screenshot("turnstile_click_pos.png")
+    print("📸 点击位置截图已保存")
+
+    # 3连击（间隔1秒），检测到token立即返回
+    xdotool_click(abs_x, abs_y)
+
+    for _ in range(30):
+        time.sleep(0.5)
+        if check_token(sb):
+            token = get_token_value(sb)
+            print(f"✅ Cloudflare Turnstile 验证通过！token：{token[:50]}...")
+            return True
+
+    print("❌ 人机验证超时")
+    sb.save_screenshot("turnstile_fail.png")
+    return False
+
+
+# ============================================================
+# 工具函数
+# ============================================================
+def now_str():
+    return datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+
+
+def send_tg(msg):
+    if not TG_TOKEN or not TG_CHAT_ID:
+        print("⚠️ TG未配置，跳过推送")
+        return
+    url = f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage"
+    data = urllib.parse.urlencode({
+        "chat_id": TG_CHAT_ID,
+        "text": msg,
+        "parse_mode": "HTML",
+    }).encode()
+    try:
+        req = urllib.request.Request(url, data=data, method="POST")
+        with urllib.request.urlopen(req, timeout=15):
+            print("📨 TG推送成功")
+    except Exception as e:
+        print(f"⚠️ TG推送失败：{e}")
+
+
+_ad_hunter_started = False
+
+def inject_ad_hunter(sb):
+    global _ad_hunter_started
+    try:
+        sb.execute_script(AD_HUNTER_JS)
+        if not _ad_hunter_started:
+            print("🛡️ 广告猎手启动")
+            _ad_hunter_started = True
+    except Exception as e:
+        print(f"⚠️ 广告猎手注入失败：{e}")
+
+
+# ============================================================
+# 主流程
+# ============================================================
+def run():
+    print(f"🚀 Pella.app Discord服务器续期脚本启动")
+    print(f"🕐 {now_str()}")
+
+    with SB(uc=True, test=True, proxy=LOCAL_PROXY) as sb:
+
+        # ── 步骤1：登录 pella.app ────────────────────────────
+        print("\n── 步骤1：登录 pella.app ──")
+        sb.uc_open_with_reconnect("https://www.pella.app/login", reconnect_time=4)
+        time.sleep(2)
+
+        print(f"✏️ 输入邮箱...")
+        sb.wait_for_element_visible("#identifier-field", timeout=20)
+        sb.type("#identifier-field", EMAIL)
+        time.sleep(0.5)
+
+        print("🖱️ 点击 Continue（邮箱确认）")
+        sb.click("button[data-localization-key='formButtonPrimary']")
+        time.sleep(2)
+
+        print("✏️ 输入密码：******")
+        sb.wait_for_element_visible("#password-field", timeout=20)
+        sb.type("#password-field", PASSWORD)
+        time.sleep(0.5)
+
+        print("🖱️ 点击 Continue（密码确认）")
+        sb.click("button[data-localization-key='formButtonPrimary']")
+
+        print("⏳ 等待跳转到 home...")
+        for _ in range(40):
+            if "/home" in sb.get_current_url():
+                print("✅ 登录成功，已进入 home 页")
+                break
+            time.sleep(0.5)
+        else:
+            print("❌ 登录超时")
+            sb.save_screenshot("login_timeout.png")
+            send_tg("❌ Pella.app：登录超时")
+            return
+
+        inject_ad_hunter(sb)
+        time.sleep(1)
+
+        # ── 步骤2：直接导航到服务器页 ────────────────────────
+        SERVER_URL = "https://www.pella.app/server/f739a66ec5744742bc4392abda57e7d5"
+        print(f"\n── 步骤2：导航到服务器页 ──")
+        sb.open(SERVER_URL)
+        print(f"📄 已导航至：{SERVER_URL}")
+
+        print("⏳ 等待服务器页加载...")
+        for _ in range(20):
+            if sb.execute_script("return document.readyState === 'complete';"):
+                break
+            time.sleep(1)
+        time.sleep(2)
+        inject_ad_hunter(sb)
+
+        # ── 步骤3：获取 cuty 续期链接 ────────────────────────
+        print("\n── 步骤3：获取续期链接 ──")
+        print("⏳ 等待续期按钮出现...")
+        for _ in range(20):
+            if sb.execute_script("return document.querySelector('a[href*=\"cuty.io\"]') !== null;"):
+                print("✅ 续期按钮已出现")
+                break
+            time.sleep(1)
+        else:
+            print("⚠️ 续期按钮等待超时")
+            sb.save_screenshot("renew_btn_wait_timeout.png")
+
+        try:
+            sb.wait_for_element_visible('a[href*="cuty.io"]', timeout=15)
+            cuty_url = sb.execute_script(
+                "return document.querySelector('a[href*=\"cuty.io\"]').href;"
+            )
+            if not cuty_url:
+                raise ValueError("cuty 链接为空")
+            print(f"🔗 cuty 链接：{cuty_url}")
+        except Exception as e:
+            print(f"❌ 找不到续期按钮：{e}")
+            sb.save_screenshot("renew_btn_not_found.png")
+            send_tg("❌ Pella.app：找不到续期按钮")
+            return
+
+        # ── 步骤4：导航到 cuty.io ────────────────────────────
+        print("\n── 步骤4：导航到 cuty.io ──")
+        sb.open(cuty_url)
+        print("⏳ 等待 cuty.io 页面加载...")
+        for _ in range(30):
+            time.sleep(0.5)
+            cur = sb.get_current_url()
+            if cur and cur != "about:blank":
+                print(f"✅ 页面已加载：{cur}")
+                break
+        # 注意：cuty.io 有反AdBlock检测，不注入广告猎手
+        time.sleep(1)
+
+        # ── 步骤5：点击 Continue ─────────────────────────────
+        print("\n── 步骤5：点击 Continue（第一步）──")
+        inject_token_listener(sb)
+
+        sb.save_screenshot("cuty_page_loaded.png")
+        print("📸 cuty 页面截图已保存")
+        btn_info = sb.execute_script("""
+            (function(){
+                var btns = document.querySelectorAll('button');
+                return Array.from(btns).map(function(b){
+                    return 'id=' + b.id
+                         + ' data-ref=' + (b.getAttribute('data-ref') || '')
+                         + ' type=' + b.type
+                         + ' text=' + b.innerText.trim().slice(0, 40);
+                });
+            })()
+        """)
+        print(f"🔍 页面 button 列表：{btn_info}")
+
+        try:
+            sb.wait_for_element_visible(
+                'button#submit-button[data-ref="first"]', timeout=20
+            )
+            sb.execute_script(
+                "document.querySelector('button#submit-button[data-ref=\"first\"]').click();"
+            )
+            print("🖱️ 已点击 Continue（JS直接触发）")
+        except Exception as e:
+            print(f"❌ 找不到第一个 Continue 按钮：{e}")
+            sb.save_screenshot("first_continue_not_found.png")
+            send_tg("❌ Pella.app：cuty.io 第一个 Continue 按钮未找到")
+            return
+
+        # 等待页面稳定
+        time.sleep(3)
+
+        # ── 步骤6：Turnstile 验证 ─────────────────────────────
+        print("\n── 步骤6：Turnstile 验证 ──")
+
+        print("⏳ 等待 Turnstile 组件...")
+        for _ in range(20):
+            if turnstile_exists(sb):
+                print("✅ Turnstile 组件就绪")
+                break
+            time.sleep(1)
+        else:
+            print("⚠️ Turnstile 未出现，尝试继续...")
+
+        inject_token_listener(sb)
+        time.sleep(0.5)
+
+        if turnstile_exists(sb):
+            token_ok = False
+
+            for attempt in range(3):
+                if attempt > 0:
+                    print(f"🔄 Turnstile 第 {attempt+1} 次尝试...")
+                    inject_token_listener(sb)
+
+                # JS清遮挡
+                sb.execute_script("""
+                    (function() {
+                        var iframes = document.querySelectorAll('iframe');
+                        var tfIframe = null;
+                        for (var i = 0; i < iframes.length; i++) {
+                            var src = iframes[i].src || '';
+                            if (src.includes('cloudflare') || src.includes('turnstile') || src.includes('challenges')) {
+                                tfIframe = iframes[i];
+                                break;
+                            }
+                        }
+                        if (!tfIframe) return;
+                        var rect = tfIframe.getBoundingClientRect();
+                        var all = document.querySelectorAll('*');
+                        for (var j = 0; j < all.length; j++) {
+                            var el = all[j];
+                            if (el === tfIframe) continue;
+                            var r = el.getBoundingClientRect();
+                            var overlap = !(r.right < rect.left || r.left > rect.right ||
+                                            r.bottom < rect.top || r.top > rect.bottom);
+                            if (!overlap) continue;
+                            var style = window.getComputedStyle(el);
+                            var z = parseInt(style.zIndex) || 0;
+                            if (z > 0 || style.position === 'fixed' || style.position === 'absolute') {
+                                el.style.pointerEvents = 'none';
+                            }
+                        }
+                        tfIframe.style.pointerEvents = 'auto';
+                        tfIframe.style.zIndex = '999999';
+                        tfIframe.style.position = 'relative';
+                    })();
+                """)
+                print("✅ 遮挡层已清除")
+                time.sleep(0.5)
+
+                # UC 模式点击
+                print("🖱️ 尝试 UC 模式点击 Turnstile...")
+                try:
+                    sb.uc_gui_click_captcha()
+                    print("✅ UC 模式点击完成，等待 token...")
+                except Exception as e:
+                    print(f"⚠️ UC 模式点击异常：{e}，fallback 到 xdotool...")
+
+                for _ in range(30):
+                    time.sleep(0.5)
+                    if check_token(sb):
+                        token = get_token_value(sb)
+                        print(f"✅ Turnstile token 获取成功：{token[:50]}...")
+                        token_ok = True
+                        break
+
+                if token_ok:
+                    break
+
+                print("⚠️ UC 模式未获取到 token，fallback 到 xdotool 坐标点击...")
+                inject_token_listener(sb)
+                if solve_turnstile(sb):
+                    token_ok = True
+                    break
+
+                sb.save_screenshot(f"turnstile_attempt_{attempt+1}_fail.png")
+
+            if not token_ok:
+                send_tg("❌ Pella.app：Turnstile 验证失败（3次均超时）")
+                return
+
+        # ── 步骤7：点击 "I am not a robot" ──────────────────
+        print("\n── 步骤7：点击 I am not a robot ──")
+        try:
+            sb.wait_for_element_visible(
+                'button#submit-button[data-ref="captcha"]', timeout=20
+            )
+            sb.execute_script(
+                "document.querySelector('button#submit-button[data-ref=\"captcha\"]').click();"
+            )
+            print("🖱️ 已点击 I am not a robot（JS直接触发）")
+        except Exception as e:
+            print(f"❌ 找不到验证按钮：{e}")
+            sb.save_screenshot("captcha_btn_not_found.png")
+            send_tg("❌ Pella.app：I am not a robot 按钮未找到")
+            return
+
+        time.sleep(1)
+
+        # ── 步骤8：等待倒计时归零 ────────────────────────────
+        print("\n── 步骤8：等待倒计时 ──")
+        last_count = -1
+        for _ in range(60):
+            time.sleep(0.5)
+            try:
+                timer_val = sb.execute_script("""
+                    (function(){
+                        var el = document.getElementById('timer');
+                        return el ? parseInt(el.innerText.trim()) : -1;
+                    })()
+                """)
+                if timer_val is None:
+                    timer_val = -1
+                if timer_val != last_count:
+                    if timer_val >= 0:
+                        print(f"  ⏱️ 倒计时：{timer_val} 秒")
+                    last_count = timer_val
+                if timer_val == 0:
+                    print("✅ 倒计时归零")
+                    break
+            except Exception:
+                pass
+        else:
+            print("⚠️ 倒计时等待超时，继续尝试...")
+
+        # ── 步骤9：等待 "Go ->" 按钮可点击 ──────────────────
+        print("\n── 步骤9：等待 Go -> 按钮 ──")
+        go_btn_ready = False
+        for _ in range(60):
+            time.sleep(0.5)
+            try:
+                if sb.execute_script("""
+                    (function(){
+                        var btn = document.querySelector('button#submit-button[data-ref="show"]');
+                        if (!btn) return false;
+                        return !btn.disabled && (btn.innerText || '').includes('Go');
+                    })()
+                """):
+                    print("✅ Go -> 按钮已就绪")
+                    go_btn_ready = True
+                    break
+            except Exception:
+                pass
+
+        if not go_btn_ready:
+            print("⚠️ Go -> 按钮等待超时，尝试直接点击...")
+
+        # ── 步骤10：点击 "Go ->" ─────────────────────────────
+        print("\n── 步骤10：点击 Go -> ──")
+        try:
+            sb.wait_for_element_visible(
+                'button#submit-button[data-ref="show"]', timeout=10
+            )
+            sb.execute_script(
+                "document.querySelector('button#submit-button[data-ref=\"show\"]').click();"
+            )
+            print("🖱️ 已点击 Go ->（JS直接触发）")
+        except Exception as e:
+            print(f"❌ 点击 Go -> 失败：{e}")
+            sb.save_screenshot("go_btn_fail.png")
+            send_tg("❌ Pella.app：Go -> 按钮点击失败")
+            return
+
+        print("⏳ 等待跳转...")
+        time.sleep(3)
+        final_url = sb.get_current_url()
+        print(f"📄 最终页面：{final_url}")
+
+        # 读取续期结果
+        print("⏳ 等待续期结果...")
+        renew_result = ""
+        for _ in range(20):
+            time.sleep(1)
+            renew_result = sb.execute_script("""
+                (function(){
+                    var el = document.querySelector('.text-2xl.font-bold.opacity-50');
+                    return el ? el.innerText.trim() : '';
+                })()
+            """) or ""
+            if renew_result:
+                print(f"✅ 续期结果：{renew_result}")
+                break
+        else:
+            print("⚠️ 未读取到续期结果文字")
+
+        sb.save_screenshot("renew_success.png")
+        print(f"\n✅ 续期流程完成！")
+        send_tg(
+            f"✅ <b>Pella.app Discord 服务器续期完成</b>\n"
+            f"🕐 时间: {now_str()}\n"
+            f"📋 结果: {renew_result or '已跳转至续期页'}\n"
+            f"🔗 最终页面: {final_url}"
+        )
+
+
+if __name__ == "__main__":
+    run()
