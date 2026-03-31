@@ -3,7 +3,7 @@ name: Pella-Renew
 on:
   workflow_dispatch:
   schedule:
-    - cron: '0 */20 * * *'   # 每20小时自动运行（pella每次续24小时）
+    - cron: '0 1 * * *'
 
 jobs:
   renew:
