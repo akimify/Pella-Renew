@@ -2,8 +2,6 @@ name: Pella-Renew
 
 on:
   workflow_dispatch:
-  schedule:
-    - cron: '0 1 * * *'
 
 jobs:
   renew:
